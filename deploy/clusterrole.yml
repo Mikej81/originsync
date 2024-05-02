@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: originsync-clusterrole
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: originsync-clusterrolebinding
+subjects:
+  - kind: ServiceAccount
+    name: originsync-sa
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: originsync-clusterrole
+  apiGroup: rbac.authorization.k8s.io

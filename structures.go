@@ -14,7 +14,7 @@ type Metadata struct {
 type Spec struct {
 	OriginServers         []OriginServer         `json:"origin_servers"`
 	NoTLS                 map[string]interface{} `json:"no_tls"`
-	Port                  int                    `json:"port"`
+	Port                  int32                  `json:"port"`
 	SameAsEndpointPort    map[string]interface{} `json:"same_as_endpoint_port"`
 	LoadbalancerAlgorithm string                 `json:"loadbalancer_algorithm"`
 	EndpointSelection     string                 `json:"endpoint_selection"`
@@ -36,8 +36,13 @@ type SiteLocator struct {
 }
 
 type Site struct {
-	Tenant    string `json:"tenant"`
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	Kind      string `json:"kind"`
+}
+
+type Delete struct {
+	FailIfReferred bool   `json:"fail_if_referred"`
+	Name           string `json:"name"`
+	Namespace      string `json:"namespace"`
 }

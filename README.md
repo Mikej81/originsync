@@ -39,11 +39,15 @@ Set these in the deployment YAML under env:
 ```yaml
 env:
   - name: KUBE_NAMESPACE
-    value: "default"  # Example: Watch the 'default' namespace only
+    value: "default" # Watch the 'default' namespace; remove or set to empty for all namespaces
   - name: XC_NAMESPACE
     value: "your-xc-namespace"
   - name: XC_TOKEN
     value: "your-xc-token"
+  - name: XC_SITENAME
+    value: "your-xc-sitename"
+  - name: XC_SITEINTERFACE
+    value: "Outside"
   - name: API_DOMAIN
     value: "https://your-api-domain.com"
 ```

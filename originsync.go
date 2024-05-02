@@ -58,7 +58,7 @@ func getClientSet() *kubernetes.Clientset {
 	return clientset
 }
 
-func checkOriginPoolExists(clientset *kubernetes.Clientset, service *corev1.Service) (bool, error) {
+func checkOriginPoolExists(service *corev1.Service) (bool, error) {
 	// Format the service name according to the specified rules
 	formattedServiceName := formatServiceName(service.Name)
 
@@ -72,7 +72,7 @@ func checkOriginPoolExists(clientset *kubernetes.Clientset, service *corev1.Serv
 	}
 
 	// Set headers
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", xc_token))
+	req.Header.Set("Authorization", fmt.Sprintf("APIToken %s", xc_token))
 
 	// Create a new HTTP client and send the request
 	client := &http.Client{Timeout: 10 * time.Second}
@@ -110,6 +110,7 @@ func watchServices(clientset *kubernetes.Clientset, namespace string) {
 			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
 				oldService, okOld := oldObj.(*corev1.Service)
+				_ = oldService
 				newService, okNew := newObj.(*corev1.Service)
 				if okOld && okNew && newService.Spec.Type == corev1.ServiceTypeNodePort {
 					go manageOriginPool(clientset, newService)
@@ -118,7 +119,7 @@ func watchServices(clientset *kubernetes.Clientset, namespace string) {
 			DeleteFunc: func(obj interface{}) {
 				service, ok := obj.(*corev1.Service)
 				if ok && service.Spec.Type == corev1.ServiceTypeNodePort {
-					go deleteOriginPool(clientset, service)
+					go deleteOriginPool(service)
 				}
 			},
 		},
@@ -165,7 +166,7 @@ func getNodeIPsForService(clientset *kubernetes.Clientset, service *corev1.Servi
 }
 
 func manageOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) {
-	exists, err := checkOriginPoolExists(clientset, service)
+	exists, err := checkOriginPoolExists(service)
 	if err != nil {
 		log.Printf("Error checking if origin pool exists: %v", err)
 		return
@@ -181,20 +182,34 @@ func manageOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) 
 }
 
 func createOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) {
-	// Get the node IPs where the service's pods are running
+	formattedServiceName := formatServiceName(service.Name)
+
+	// Fetch the Node IPs dynamically
 	nodeIPs, err := getNodeIPsForService(clientset, service)
 	if err != nil {
-		log.Printf("Error getting node IPs: %v", err)
+		log.Printf("Error fetching node IPs: %v", err)
+		return
+	}
+	if len(nodeIPs) == 0 {
+		log.Printf("No nodes found for service %s, skipping origin pool creation", service.Name)
 		return
 	}
 
-	// Format the service name according to the specified rules
-	formattedServiceName := formatServiceName(service.Name)
+	// Assume each service has at least one port and the first one is the NodePort
+	var nodePort int32
+	if len(service.Spec.Ports) > 0 && service.Spec.Ports[0].NodePort != 0 {
+		nodePort = service.Spec.Ports[0].NodePort
+	} else {
+		log.Printf("No NodePort found for service %s, skipping origin pool creation", service.Name)
+		return
+	}
 
 	// Construct the URL for the API call
-	url := fmt.Sprintf("%s/api/config/namespaces/%s/origin_pools", api_domain, xc_namespace)
+	apiDomain := os.Getenv("API_DOMAIN")
+	xcNamespace := os.Getenv("XC_NAMESPACE")
+	url := fmt.Sprintf("%s/api/config/namespaces/%s/origin_pools", apiDomain, xcNamespace)
 
-	// Build the origin servers slice dynamically based on the IPs
+	// Prepare the payload with the dynamic NodePort and IPs
 	originServers := make([]OriginServer, len(nodeIPs))
 	for i, ip := range nodeIPs {
 		originServers[i] = OriginServer{
@@ -202,30 +217,26 @@ func createOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) 
 				IP: ip,
 				SiteLocator: SiteLocator{
 					Site: Site{
-						Tenant:    "f5-sa-rnxeudss",
 						Namespace: "system",
 						Name:      xc_sitename,
 						Kind:      "site",
 					},
 				},
-				InsideNetwork: map[string]interface{}{}, // Adjust based on xc_siteinterface
-				// Add conditional population of InsideNetwork or OutsideNetwork
-				OutsideNetwork: map[string]interface{}{}, // Use if xc_siteinterface == "Outside"
+				InsideNetwork: map[string]interface{}{},
 			},
 		}
 	}
 
-	// Create the payload for the POST request
 	payload := OriginPool{
 		Metadata: Metadata{
-			Name:        formattedServiceName, // Dynamically use the service name
+			Name:        formattedServiceName,
 			Description: "Created by OriginSync",
 			Disable:     false,
 		},
 		Spec: Spec{
 			OriginServers:         originServers,
 			NoTLS:                 map[string]interface{}{},
-			Port:                  3000, // Adjust as necessary
+			Port:                  nodePort, // Use the dynamically fetched NodePort
 			SameAsEndpointPort:    map[string]interface{}{},
 			LoadbalancerAlgorithm: "LB_OVERRIDE",
 			EndpointSelection:     "LOCAL_PREFERRED",
@@ -239,6 +250,7 @@ func createOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) 
 	}
 
 	// Create the request
+	xcToken := os.Getenv("XC_TOKEN")
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Error creating request: %v", err)
@@ -247,39 +259,53 @@ func createOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) 
 
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("APIToken %s", xc_token))
+	req.Header.Set("Authorization", fmt.Sprintf("APIToken %s", xcToken))
 
-	// Create a new HTTP client and send the request
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	// Send the request
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("Error sending request to API: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Check the response
+	// Check the response status
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Failed to create origin pool: %s", resp.Status)
+		log.Printf("Failed to create/update origin pool: %s", resp.Status)
 	} else {
-		log.Println("Successfully created origin pool")
+		log.Println("Successfully created/updated origin pool")
 	}
 }
 
 func updateOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) {
-	// need to determin how we will name the origin pool, and check for existence before trying to update, and append name to URI
+	formattedServiceName := formatServiceName(service.Name)
 
-	// Get the node IPs where the service's pods are running
+	// Fetch the Node IPs dynamically
 	nodeIPs, err := getNodeIPsForService(clientset, service)
 	if err != nil {
-		log.Printf("Error getting node IPs: %v", err)
+		log.Printf("Error fetching node IPs: %v", err)
+		return
+	}
+	if len(nodeIPs) == 0 {
+		log.Printf("No nodes found for service %s, skipping origin pool creation", service.Name)
+		return
+	}
+
+	// Assume each service has at least one port and the first one is the NodePort
+	var nodePort int32
+	if len(service.Spec.Ports) > 0 && service.Spec.Ports[0].NodePort != 0 {
+		nodePort = service.Spec.Ports[0].NodePort
+	} else {
+		log.Printf("No NodePort found for service %s, skipping origin pool creation", service.Name)
 		return
 	}
 
 	// Construct the URL for the API call
-	url := fmt.Sprintf("%s/api/config/namespaces/%s/origin_pools", api_domain, xc_namespace)
+	apiDomain := os.Getenv("API_DOMAIN")
+	xcNamespace := os.Getenv("XC_NAMESPACE")
+	url := fmt.Sprintf("%s/api/config/namespaces/%s/origin_pools/%s", apiDomain, xcNamespace, formattedServiceName)
 
-	// Build the origin servers slice dynamically based on the IPs
+	// Prepare the payload with the dynamic NodePort and IPs
 	originServers := make([]OriginServer, len(nodeIPs))
 	for i, ip := range nodeIPs {
 		originServers[i] = OriginServer{
@@ -287,30 +313,26 @@ func updateOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) 
 				IP: ip,
 				SiteLocator: SiteLocator{
 					Site: Site{
-						Tenant:    "f5-sa-rnxeudss",
 						Namespace: "system",
 						Name:      xc_sitename,
 						Kind:      "site",
 					},
 				},
-				InsideNetwork: map[string]interface{}{}, // Adjust based on xc_siteinterface
-				// Add conditional population of InsideNetwork or OutsideNetwork
-				OutsideNetwork: map[string]interface{}{}, // Use if xc_siteinterface == "Outside"
+				InsideNetwork: map[string]interface{}{},
 			},
 		}
 	}
 
-	// Create the payload for the POST request
 	payload := OriginPool{
 		Metadata: Metadata{
-			Name:        service.Name, // Dynamically use the service name
+			Name:        formattedServiceName,
 			Description: "Created by OriginSync",
 			Disable:     false,
 		},
 		Spec: Spec{
 			OriginServers:         originServers,
 			NoTLS:                 map[string]interface{}{},
-			Port:                  3000, // Adjust as necessary
+			Port:                  nodePort, // Use the dynamically fetched NodePort
 			SameAsEndpointPort:    map[string]interface{}{},
 			LoadbalancerAlgorithm: "LB_OVERRIDE",
 			EndpointSelection:     "LOCAL_PREFERRED",
@@ -324,6 +346,7 @@ func updateOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) 
 	}
 
 	// Create the request
+	xcToken := os.Getenv("XC_TOKEN")
 	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Error creating request: %v", err)
@@ -332,27 +355,72 @@ func updateOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) 
 
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("APIToken %s", xc_token))
+	req.Header.Set("Authorization", fmt.Sprintf("APIToken %s", xcToken))
 
-	// Create a new HTTP client and send the request
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	// Send the request
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("Error sending request to API: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Check the response
+	// Check the response status
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Failed to create origin pool: %s", resp.Status)
+		log.Printf("Failed to create/update origin pool: %s", resp.Status)
 	} else {
-		log.Println("Successfully created origin pool")
+		log.Println("Successfully created/updated origin pool")
 	}
 }
 
-func deleteOriginPool(clientset *kubernetes.Clientset, service *corev1.Service) {
-	// Logic to delete
+func deleteOriginPool(service *corev1.Service) {
+	// Format the service name to meet naming conventions and append to the URI
+	formattedServiceName := formatServiceName(service.Name)
+	apiDomain := os.Getenv("API_DOMAIN")
+	xcNamespace := os.Getenv("XC_NAMESPACE")
+	url := fmt.Sprintf("%s/api/config/namespaces/%s/origin_pools/%s", apiDomain, xcNamespace, formattedServiceName)
+
+	// Create the payload using the Delete struct
+	deletePayload := Delete{
+		FailIfReferred: false, // Set according to your requirement
+		Name:           formattedServiceName,
+		Namespace:      xcNamespace,
+	}
+
+	// Marshal the payload into JSON
+	jsonData, err := json.Marshal(deletePayload)
+	if err != nil {
+		log.Printf("Error marshalling delete payload: %v", err)
+		return
+	}
+
+	// Create the request
+	req, err := http.NewRequest("DELETE", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Printf("Error creating DELETE request: %v", err)
+		return
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	xcToken := os.Getenv("XC_TOKEN")
+	req.Header.Set("Authorization", fmt.Sprintf("APIToken %s", xcToken))
+
+	// Create a new HTTP client and send the request
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Error sending DELETE request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Check the response
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Failed to delete origin pool: %s, Status Code: %d", resp.Status, resp.StatusCode)
+	} else {
+		log.Println("Successfully deleted origin pool")
+	}
 }
 
 func formatServiceName(serviceName string) string {

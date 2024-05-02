@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: originsync
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: originsync
+  template:
+    metadata:
+      labels:
+        app: originsync
+    spec:
+      serviceAccountName: originsync-sa
+      containers:
+        - name: originsync
+          image: mcoleman81/originsync:latest
+          imagePullPolicy: Always
+          env:
+            - name: KUBE_NAMESPACE
+              value: "default" # Watch the 'default' namespace; remove or set to empty for all namespaces
+            - name: XC_NAMESPACE
+              value: "your-xc-namespace"
+            - name: XC_TOKEN
+              value: "your-xc-token"
+            - name: XC_SITENAME
+              value: "your-xc-sitename"
+            - name: XC_SITEINTERFACE
+              value: "Outside"
+            - name: API_DOMAIN
+              value: "https://your-api-domain.com"
+          ports:
+            - containerPort: 8080 # Adjust if your application listens on a port
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "100Mi"
+            limits:
+              cpu: "500m"
+              memory: "500Mi"

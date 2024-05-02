@@ -19,3 +19,7 @@
 
 # Go workspace file
 go.work
+
+test.sh
+test.yaml
+build.sh
