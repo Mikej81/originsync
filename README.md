@@ -51,3 +51,8 @@ env:
   - name: API_DOMAIN
     value: "https://your-api-domain.com"
 ```
+
+## To Do
+
+- Update TLS Config
+- Add ClusterIP service for CEonK8s.
