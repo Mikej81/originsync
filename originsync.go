@@ -382,7 +382,7 @@ func deleteOriginPool(service *corev1.Service) {
 
 	// Create the payload using the Delete struct
 	deletePayload := Delete{
-		FailIfReferred: false, // Set according to your requirement
+		FailIfReferred: false, // maybe make this optional later?
 		Name:           formattedServiceName,
 		Namespace:      xcNamespace,
 	}
